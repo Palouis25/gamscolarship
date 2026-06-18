@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+# Block config files from crawlers
+Disallow: /config/
+Disallow: /cache/
+
+Sitemap: https://gamscolaship.online/sitemap.xml

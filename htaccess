@@ -1,0 +1,96 @@
+# ─────────────────────────────────────────────────────────────
+# GamScholarship — .htaccess
+# ─────────────────────────────────────────────────────────────
+
+Options -Indexes
+ServerSignature Off
+
+# ── Protect config folder ─────────────────────────────────────
+<Files "db.php">
+    Order allow,deny
+    Deny from all
+</Files>
+
+<Files "security.php">
+    Order allow,deny
+    Deny from all
+</Files>
+
+<Files "layout.php">
+    Order allow,deny
+    Deny from all
+</Files>
+
+<Files "app.php">
+    Order allow,deny
+    Deny from all
+</Files>
+
+<Files "scraper.php">
+    Order allow,deny
+    Deny from all
+</Files>
+
+<Files "send_weekly_digest.php">
+    Order allow,deny
+    Deny from all
+</Files>
+
+RedirectMatch 404 /\.git
+
+# ── Block access to sensitive files ──────────────────────────
+<FilesMatch "\.(env|log|bak|sql|sh|git|json)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Allow gam_sch.json only to PHP (not direct browser access)
+<Files "gam_sch.json">
+    Order allow,deny
+    Deny from all
+</Files>
+
+# ── Delete the duplicate privacy file ────────────────────────
+# (Remove "privacy (1).php" via FTP/cPanel — it cannot be blocked here due to spaces in the name)
+
+# ── Force HTTPS ───────────────────────────────────────────────
+RewriteEngine On
+RewriteCond %{HTTPS} off
+RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# ── Remove trailing slash from files ─────────────────────────
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)/$ /$1 [L,R=301]
+
+# ── Custom error pages ────────────────────────────────────────
+ErrorDocument 404 /index.php
+ErrorDocument 403 /index.php
+ErrorDocument 500 /index.php
+
+# ── Security headers (backup — also set in PHP) ───────────────
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    Header unset X-Powered-By
+    Header unset Server
+</IfModule>
+
+# ── Compression ───────────────────────────────────────────────
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/css text/javascript application/javascript application/json
+</IfModule>
+
+# ── Browser caching ───────────────────────────────────────────
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css                  "access plus 1 month"
+    ExpiresByType application/javascript    "access plus 1 month"
+    ExpiresByType image/jpeg                "access plus 6 months"
+    ExpiresByType image/png                 "access plus 6 months"
+    ExpiresByType image/webp                "access plus 6 months"
+    ExpiresByType image/svg+xml             "access plus 6 months"
+    ExpiresByType text/html                 "access plus 1 hour"
+</IfModule>
