@@ -20,7 +20,7 @@ export default function Scholarships() {
   const [funding, setFunding] = useState(searchParams.get('funding') || '');
   const [field, setField] = useState(searchParams.get('field') || '');
 
-  const list = scholarships ?? [];
+  const list = useMemo(() => scholarships ?? [], [scholarships]);
 
   const levels = useMemo(() => unique(list.map((s) => s.level)), [list]);
   const countries = useMemo(() => unique(list.map((s) => s.country)), [list]);
