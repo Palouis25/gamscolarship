@@ -48,7 +48,9 @@ The seed script uses the same automated ingestion pipeline as future source adap
 
 ## Vercel production configuration
 
-The frontend needs `VITE_CONVEX_URL` at build time. In Vercel, open the project settings, go to Environment Variables, and set `VITE_CONVEX_URL` to the Convex URL for the **production deployment** (not the development URL created by `npx convex dev`). If the project uses `VITE_CONVEX_SITE_URL`, set it to the matching production `.convex.site` URL too. Redeploy after changing environment variables.
+`vercel.json` sets the build command to `npx convex deploy --cmd 'npm run build'`. On every Vercel build this pushes the Convex functions/schema to the **production** deployment and injects that deployment's `VITE_CONVEX_URL` into the Vite build automatically.
+
+In Vercel > Settings > Environment Variables, set `CONVEX_DEPLOY_KEY` to the **Production** deploy key from the Convex dashboard (Settings > Deploy keys). Do not set `VITE_CONVEX_URL` in Vercel; if one exists (especially one holding a key instead of a `https://...convex.cloud` URL), delete it. Redeploy after changing environment variables.
 
 Keep `ADMIN_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CSE_ID`, and `ANTHROPIC_API_KEY` as server-side Convex environment variables. Never put these secrets in `VITE_` variables, `.env.example`, or frontend code.
 
@@ -57,6 +59,8 @@ Keep `ADMIN_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CSE_ID`, and `ANTHROPIC_API_KEY` as 
 ```bash
 npm run dev
 npm run build
+npm run lint
+npm run typecheck   # typechecks convex/ the same way `npx convex deploy` does
 ```
 
 Convex regenerates `convex/_generated/` when `npx convex dev` runs. Do not edit generated files by hand.
