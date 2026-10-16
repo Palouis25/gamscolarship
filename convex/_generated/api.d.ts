@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as admin from "../admin.js";
 import type * as crons from "../crons.js";
 import type * as discovery from "../discovery.js";
 import type * as duplicates from "../duplicates.js";
@@ -22,6 +23,11 @@ import type * as scholarships from "../scholarships.js";
 import type * as seed from "../seed.js";
 import type * as seedData from "../seedData.js";
 import type * as sourceRegistry from "../sourceRegistry.js";
+import type * as lib_adminAuth from "../lib/adminAuth.js";
+import type * as maintenance from "../maintenance.js";
+import type * as opportunities from "../opportunities.js";
+import type * as rssIngestion from "../rssIngestion.js";
+import type * as scholarships from "../scholarships.js";
 import type * as sources_erasmusMundusAdapter from "../sources/erasmusMundusAdapter.js";
 import type * as sources_manualAdapter from "../sources/manualAdapter.js";
 import type * as sources_officialSiteAdapter from "../sources/officialSiteAdapter.js";
@@ -38,6 +44,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  admin: typeof admin;
   crons: typeof crons;
   discovery: typeof discovery;
   duplicates: typeof duplicates;
@@ -52,6 +59,11 @@ declare const fullApi: ApiFromModules<{
   seed: typeof seed;
   seedData: typeof seedData;
   sourceRegistry: typeof sourceRegistry;
+  "lib/adminAuth": typeof lib_adminAuth;
+  maintenance: typeof maintenance;
+  opportunities: typeof opportunities;
+  rssIngestion: typeof rssIngestion;
+  scholarships: typeof scholarships;
   "sources/erasmusMundusAdapter": typeof sources_erasmusMundusAdapter;
   "sources/manualAdapter": typeof sources_manualAdapter;
   "sources/officialSiteAdapter": typeof sources_officialSiteAdapter;
