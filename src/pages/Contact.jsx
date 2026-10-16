@@ -38,7 +38,7 @@ export default function Contact() {
       <section className="section">
         <div className="container">
           <div className="contact-notice">
-            This form doesn't send messages automatically yet &mdash; submitting
+            This form doesn&apos;t send messages automatically yet &mdash; submitting
             opens your email app with the details pre-filled, ready to send to
             info@gamscolarship.online.
           </div>

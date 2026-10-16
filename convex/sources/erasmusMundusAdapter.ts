@@ -20,7 +20,7 @@
 // participating universities, and funding year(s). It does NOT include a
 // per-programme application deadline or a rich description -- those live
 // on each programme's own official site (the <link> URL), which is why
-// `deadline` below is an honest descriptive string rather than a invented
+// `deadline` below is an honest descriptive string rather than an invented
 // ISO date, and why `applicationUrl`/`officialSourceUrl` both point at the
 // programme's own site for GamScholarship's existing reachability check to
 // verify.
@@ -108,32 +108,31 @@ function plainDescriptionSnippet(html: string): string {
     .trim();
 }
 
+const EC_RECORD = /https:\/\/erasmus-plus\.ec\.europa\.eu\/[^\s"'<>]+/;
+
 const GENERIC_EMJM_ELIGIBILITY = [
   "Open to master's-level students from all over the world",
-  'Applicants typically need a completed (or nearly-completed) first degree, per the individual programme\u2019s own entry requirements',
+  "Entry requirements (including the required first degree) are set by each programme, so check the programme's own site",
 ];
 
 const GENERIC_EMJM_REQUIREMENTS = [
   "Apply directly on the programme's own official website (linked above), not through EACEA",
-  'Most consortia require applications between October and January for courses starting the following academic year (confirm exact dates on the programme site)',
+  'Application dates and documents are set by each consortium: confirm them on the programme site',
 ];
 
 const GENERIC_EMJM_BENEFITS = [
-  'Full Erasmus Mundus scholarships are available for the best applicants on most listed programmes (tuition, travel, and a living allowance are typical, but coverage is set by each consortium)',
+  'Erasmus Mundus scholarships are offered to selected applicants on listed programmes; what they cover is set by each consortium',
 ];
 
-/**
- * Only returns null when the item is missing something ingestNormalized
- * requires (title/link) -- see parseRssFeed, which already filters those
- * out, so in practice this always succeeds for anything parseRssFeed
- * returned.
- */
+/** Maps one feed item to a listing. Every fact is read from the feed item;
+ *  nothing is invented. The feed carries no per-programme deadline, so the
+ *  deadline is descriptive text and the listing never auto-expires. */
 export function normalizeErasmusMundusItem(item: RssItem): NormalizedListing {
   const fields = categoryValues(item, 'Studies');
   const duration = categoryValues(item, 'ECTS Duration')[0];
   const universities = categoryValues(item, 'EMJMD Universities');
-  const years = categoryValues(item, 'Years for EMJMD');
   const projectSnippet = plainDescriptionSnippet(item.descriptionHtml);
+  const ecRecord = EC_RECORD.exec(item.descriptionHtml)?.[0];
 
   const descriptionParts = [
     'Erasmus Mundus Joint Master programme, funded by the European Union and listed in the official EACEA Erasmus Mundus Catalogue.',
@@ -144,21 +143,21 @@ export function normalizeErasmusMundusItem(item: RssItem): NormalizedListing {
   ].filter(Boolean);
 
   return {
-    kind: 'scholarship',
     sourceName: 'erasmus-mundus-catalogue-rss',
     sourceId: item.guid,
     title: item.title,
     organization: 'Erasmus Mundus (European Commission / EACEA) — ' + (universities[0] ?? 'multi-university consortium'),
     country: 'Multiple (EU + partner countries — see programme site)',
     level: "Master's",
-    funding: 'Most Erasmus Mundus Joint Masters offer full scholarships; confirm current funding status on the programme site, since some legacy-name programmes no longer receive EU funding.',
+    funding: 'Erasmus Mundus scholarships for selected applicants; confirm current funding on the programme site',
     field: fields.length > 0 ? fields.join(', ') : 'See programme site',
-    deadline: 'Varies by programme — most open for applications between October and January; confirm the exact date on the official programme website linked above.',
+    deadline: 'Varies by programme — confirm the exact date on the official programme website',
     description: descriptionParts.join(' '),
     eligibility: GENERIC_EMJM_ELIGIBILITY,
     requirements: GENERIC_EMJM_REQUIREMENTS,
     benefits: GENERIC_EMJM_BENEFITS,
     applicationUrl: item.link,
-    officialSourceUrl: item.link,
+    officialSourceUrl: ecRecord ?? item.link,
+    urlTrust: 'official_feed',
   };
 }

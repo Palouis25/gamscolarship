@@ -1,304 +1,240 @@
 import { v } from 'convex/values';
-import { mutation, internalMutation, internalQuery, internalAction } from './_generated/server';
+import { internalMutation, internalQuery, internalAction } from './_generated/server';
 import { internal } from './_generated/api';
-import { requireAdmin } from './lib/adminAuth';
 import { normalizeManualEntry } from './sources/manualAdapter';
 import { runStaticChecks, looksTemplated } from './validation';
 import { duplicateScore, DUPLICATE_REVIEW_THRESHOLD } from './duplicates';
+import { parseDeadline } from './lib/deadline';
+import { checkLinks } from './lib/linkCheck';
 import type { NormalizedListing } from './sources/types';
 
-const TABLE_FOR_KIND = { scholarship: 'scholarships', opportunity: 'opportunities' } as const;
+const CHECK_BATCH_LIMIT = 40; // listings link-checked per run
+const CHECK_CONCURRENCY = 5;
+const RECHECK_PENDING_AFTER_MS = 60 * 60 * 1000; // don't hammer a failing link
+const REVALIDATE_VERIFIED_AFTER_MS = 6 * 24 * 60 * 60 * 1000;
+const PENDING_GIVE_UP_MS = 14 * 24 * 60 * 60 * 1000;
+const DEMOTE_AT = 3; // dead check = 2 points, transient = 1
+
+export type IngestOutcome = 'inserted' | 'updated' | 'unchanged' | 'rejected' | 'duplicate' | 'expired';
+
+const CONTENT_FIELDS = [
+  'title', 'organization', 'country', 'level', 'funding', 'field', 'deadline', 'description',
+  'eligibility', 'requirements', 'benefits', 'applicationUrl', 'officialSourceUrl', 'isSample',
+] as const;
 
 /**
- * Runs the static (non-network) part of the pipeline for one normalized
- * listing — validation + duplicate check — and inserts or updates it with
- * the resulting verificationStatus. Shared by every source adapter's entry
- * point (currently just ingestManual below).
- *
- * Does NOT check URL reachability itself (mutations can't make network
- * calls); it schedules checkReachabilityAndPromote to do that as a
- * follow-up action, so a listing that passes static checks starts as
- * "pending" and only becomes "verified" once its links have actually been
- * confirmed reachable.
+ * Validation + duplicate detection + upsert for one normalized listing.
+ * Network checks happen later (verifyPendingListings); a listing enters as
+ * "pending" and is never public until its links verify. Re-ingesting the same
+ * (sourceName, sourceId) updates the existing row, whatever its state, so
+ * repeated runs never accumulate duplicates.
  */
-export async function ingestNormalized(ctx: any, listing: NormalizedListing) {
-  const table = TABLE_FOR_KIND[listing.kind];
+export async function ingestNormalized(ctx: any, input: NormalizedListing) {
   const now = new Date().toISOString();
+  const dl = parseDeadline(input.deadline ?? '');
+  const listing: NormalizedListing = { ...input, deadline: dl.kind === 'date' ? dl.iso : (input.deadline ?? '').trim() };
 
-  const staticIssues = runStaticChecks(listing);
-  const templated = looksTemplated(listing);
+  const issues = runStaticChecks(listing);
+  const pastOnly = issues.length > 0 && issues.every((i) => i.field === 'deadline' && i.problem.includes('past'));
+  const hardIssues = issues.filter((i) => !(i.field === 'deadline' && i.problem.includes('past')));
 
-  // Duplicate check against every existing row in this table that isn't
-  // already rejected. Simple O(n) scan — fine at hundreds/low-thousands of
-  // rows; revisit with a smarter index if the table grows much larger.
-  const existing = await ctx.db
-    .query(table)
-    .filter((q: any) => q.neq(q.field('verificationStatus'), 'rejected'))
-    .collect();
+  // 1. Same source + same upstream id -> update target (rejected rows included).
+  let target: any = null;
+  if (listing.sourceId) {
+    target = await ctx.db
+      .query('scholarships')
+      .withIndex('by_source', (q: any) => q.eq('sourceName', listing.sourceName).eq('sourceId', listing.sourceId))
+      .first();
+  }
 
-  let bestMatch: { id: string; score: number } | null = null;
-  for (const doc of existing) {
-    if (listing.sourceId && doc.sourceName === listing.sourceName && doc.sourceId === listing.sourceId) {
-      // Same source re-sending the same record (e.g. a re-run) — treat as
-      // an update target, not a duplicate to flag.
-      bestMatch = { id: doc._id, score: 1 };
-      break;
+  if (pastOnly) {
+    // An expired listing is never published; if we already hold it, mark it expired.
+    if (target && target.status !== 'expired') {
+      await ctx.db.patch(target._id, { status: 'expired', deadline: listing.deadline, updatedAt: now });
     }
-    const score = duplicateScore(doc, listing);
-    if (!bestMatch || score > bestMatch.score) {
-      bestMatch = { id: doc._id, score };
+    return { docId: target?._id ?? null, outcome: 'expired' as IngestOutcome, verificationStatus: target?.verificationStatus ?? 'rejected' };
+  }
+
+  // 2. Otherwise look for the same scholarship arriving from another source.
+  let duplicateOf: string | null = null;
+  if (!target && hardIssues.length === 0) {
+    const others = await ctx.db.query('scholarships').filter((q: any) => q.neq(q.field('verificationStatus'), 'rejected')).collect();
+    let best: { doc: any; score: number } | null = null;
+    for (const doc of others) {
+      const score = duplicateScore(doc, listing);
+      if (!best || score > best.score) best = { doc, score };
+    }
+    if (best && best.score >= DUPLICATE_REVIEW_THRESHOLD) {
+      if (best.doc.status === 'expired') target = best.doc; // new cycle of a known scholarship: refresh it
+      else duplicateOf = best.doc._id;
     }
   }
 
-  const isReingestOfSameRecord =
-    bestMatch !== null &&
-    bestMatch.score === 1 &&
-    listing.sourceId !== undefined;
-
-  let verificationStatus: 'pending' | 'rejected' = 'pending';
+  let verificationStatus: 'pending' | 'verified' | 'rejected' = 'pending';
   let verificationNotes: string | undefined;
-  let possibleDuplicateOf: string | undefined;
-
-  if (staticIssues.length > 0) {
+  if (hardIssues.length > 0) {
     verificationStatus = 'rejected';
-    verificationNotes = staticIssues.map((i) => `${i.field}: ${i.problem}`).join('; ');
-  } else if (templated) {
+    verificationNotes = hardIssues.map((i) => `${i.field}: ${i.problem}`).join('; ');
+  } else if (looksTemplated(listing)) {
     verificationStatus = 'rejected';
-    verificationNotes =
-      'Automated checks flagged a suspicious templated listing. It remains hidden.';
-  } else if (!isReingestOfSameRecord && bestMatch && bestMatch.score >= DUPLICATE_REVIEW_THRESHOLD) {
+    verificationNotes = 'Automated checks flagged a suspicious templated listing.';
+  } else if (duplicateOf) {
     verificationStatus = 'rejected';
-    possibleDuplicateOf = bestMatch.id;
-    verificationNotes = `Automated duplicate check flagged a similar existing listing (similarity score ${bestMatch.score.toFixed(2)}).`;
+    verificationNotes = 'Duplicate of an existing listing.';
+  } else if (
+    target &&
+    target.verificationStatus === 'verified' &&
+    target.status === 'active' &&
+    target.applicationUrl === listing.applicationUrl &&
+    target.officialSourceUrl === listing.officialSourceUrl
+  ) {
+    verificationStatus = 'verified'; // same links, already verified: don't flap out of public view
+    verificationNotes = target.verificationNotes;
   }
 
-  const baseFields = {
-    title: listing.title,
-    organization: listing.organization,
-    country: listing.country,
-    deadline: listing.deadline,
-    description: listing.description,
-    applicationUrl: listing.applicationUrl,
-    officialSourceUrl: listing.officialSourceUrl,
-    status: 'active' as const,
+  const fields = {
+    title: listing.title, organization: listing.organization, country: listing.country,
+    level: listing.level, funding: listing.funding, field: listing.field,
+    deadline: listing.deadline, description: listing.description,
+    eligibility: listing.eligibility ?? [], requirements: listing.requirements ?? [], benefits: listing.benefits ?? [],
+    applicationUrl: listing.applicationUrl, officialSourceUrl: listing.officialSourceUrl,
+    isSample: listing.isSample === true,
+  };
+
+  if (target) {
+    const unchanged =
+      target.status === 'active' &&
+      target.verificationStatus === verificationStatus &&
+      target.verificationNotes === verificationNotes &&
+      target.possibleDuplicateOf === (duplicateOf ?? undefined) &&
+      CONTENT_FIELDS.every((k) => JSON.stringify((target as any)[k] ?? null) === JSON.stringify((fields as any)[k] ?? null));
+    if (unchanged) return { docId: target._id, outcome: 'unchanged' as IngestOutcome, verificationStatus };
+    await ctx.db.patch(target._id, {
+      ...fields,
+      sourceName: target.sourceName,
+      status: 'active',
+      verificationStatus,
+      verificationNotes,
+      possibleDuplicateOf: duplicateOf ?? undefined,
+      // A listing awaiting its link check has no check yet, so it is due immediately.
+      lastCheckedAt: verificationStatus === 'pending' ? undefined : (verificationStatus === 'verified' ? target.lastCheckedAt : now),
+      updatedAt: now,
+    });
+    return { docId: target._id, outcome: 'updated' as IngestOutcome, verificationStatus };
+  }
+
+  const docId = await ctx.db.insert('scholarships', {
+    ...fields,
+    status: 'active',
     sourceName: listing.sourceName,
     sourceId: listing.sourceId,
     verificationStatus,
     verificationNotes,
-    possibleDuplicateOf,
-    isSample: false,
-    lastCheckedAt: now,
-    lastVerifiedAt: undefined,
+    possibleDuplicateOf: duplicateOf ?? undefined,
+    lastCheckedAt: verificationStatus === 'pending' ? undefined : now,
+    createdAt: now,
     updatedAt: now,
-  };
-
-  const specificFields =
-    listing.kind === 'scholarship'
-      ? {
-          level: listing.level,
-          funding: listing.funding,
-          field: listing.field,
-          eligibility: listing.eligibility,
-          requirements: listing.requirements,
-          benefits: listing.benefits,
-        }
-      : { category: listing.category };
-
-  let docId: string;
-  if (isReingestOfSameRecord && bestMatch) {
-    await ctx.db.patch(bestMatch.id, { ...baseFields, ...specificFields });
-    docId = bestMatch.id;
-  } else {
-    docId = await ctx.db.insert(table, { ...baseFields, ...specificFields, createdAt: now });
-  }
-
-  // Only run the network verification when static checks passed. Anything
-  // rejected above remains hidden and does not consume a network check.
-  if (verificationStatus === 'pending') {
-    await ctx.scheduler.runAfter(0, internal.ingestion.checkReachabilityAndPromote, {
-      table,
-      id: docId,
-    });
-  }
-
-  return { docId, verificationStatus };
+  });
+  const outcome: IngestOutcome = duplicateOf ? 'duplicate' : verificationStatus === 'rejected' ? 'rejected' : 'inserted';
+  return { docId, outcome, verificationStatus };
 }
 
-/**
- * Public entry point for the "manual" source — the only source enabled so
- * far. Called by scripts/seed.mjs, or by hand for a one-off addition.
- * Requires the ADMIN_KEY (see convex/lib/adminAuth.ts) since it's a public
- * mutation reachable by anyone with the Convex URL.
- */
-export const ingestManual = mutation({
-  args: {
-    adminKey: v.string(),
-    listing: v.any(),
-  },
-  handler: async (ctx, { adminKey, listing }) => {
-    requireAdmin(adminKey);
-    const normalized = normalizeManualEntry(listing);
-    return await ingestNormalized(ctx, normalized);
-  },
-});
-
-/**
- * Internal entry point used by convex/discovery.ts — the automated
- * "official site" adapter runs as an action (it needs network access for
- * search + fetch + extraction), and actions cannot write to the database
- * directly, so it calls this internalMutation once per listing it has
- * extracted. Goes through the exact same validation/duplicate/reachability
- * pipeline as ingestManual; discovery never bypasses verification.
- */
+/** Entry point for automated adapters (RSS, official-site discovery). */
 export const ingestDiscovered = internalMutation({
   args: { listing: v.any() },
-  handler: async (ctx, { listing }) => {
-    return await ingestNormalized(ctx, listing as NormalizedListing);
-  },
+  handler: async (ctx, { listing }) => ingestNormalized(ctx, listing as NormalizedListing),
 });
 
-/**
- * Follow-up action: confirms the applicationUrl (and officialSourceUrl, if
- * present) actually resolve, then promotes the listing to "verified" or
- * moves it back to pending so the automatic verifier can retry. Scheduled automatically by
- * ingestNormalized above, and re-run periodically for already-verified
- * listings by revalidateVerifiedListings (see convex/crons.ts).
- */
-export const checkReachabilityAndPromote = internalAction({
-  args: {
-    table: v.union(v.literal('scholarships'), v.literal('opportunities')),
-    id: v.string(),
-  },
-  handler: async (ctx, { table, id }) => {
-    const doc: any = await ctx.runQuery(internal.ingestion.getById, { table, id });
-    if (!doc) return;
+/** Entry point for curated entries; used by seed.run. */
+export async function ingestManualEntry(ctx: any, raw: Record<string, any>) {
+  return ingestNormalized(ctx, normalizeManualEntry(raw));
+}
 
-    const urlsToCheck = [doc.applicationUrl, doc.officialSourceUrl].filter(Boolean) as string[];
-    let allReachable = urlsToCheck.length > 0;
-    const problems: string[] = [];
+// ---------------------------------------------------------------- link checks
 
-    for (const url of urlsToCheck) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
-        const res = await fetch(url, { method: 'GET', redirect: 'follow', signal: controller.signal });
-        clearTimeout(timeout);
-        if (!res.ok) {
-          allReachable = false;
-          problems.push(`${url} responded with status ${res.status}`);
-        }
-      } catch (err) {
-        allReachable = false;
-        problems.push(`${url} was not reachable (${(err as Error).message})`);
-      }
-    }
-
-    const now = new Date().toISOString();
-    if (allReachable) {
-      await ctx.runMutation(internal.ingestion.applyVerificationResult, {
-        table,
-        id,
-        verificationStatus: 'verified',
-        verificationNotes: undefined,
-        lastCheckedAt: now,
-        lastVerifiedAt: now,
-      });
-    } else {
-      await ctx.runMutation(internal.ingestion.applyVerificationResult, {
-        table,
-        id,
-        verificationStatus: 'pending',
-        verificationNotes: `Automated link check failed; automatic retry scheduled: ${problems.join('; ')}`,
-        lastCheckedAt: now,
-      });
-    }
-  },
-});
-
-export const getById = internalQuery({
-  args: { table: v.union(v.literal('scholarships'), v.literal('opportunities')), id: v.string() },
-  handler: async (ctx, { table, id }) => {
-    const normalized = ctx.db.normalizeId(table, id);
-    if (!normalized) return null;
-    return await ctx.db.get(normalized);
-  },
-});
-
-export const applyVerificationResult = internalMutation({
-  args: {
-    table: v.union(v.literal('scholarships'), v.literal('opportunities')),
-    id: v.string(),
-    verificationStatus: v.union(v.literal('verified'), v.literal('pending')),
-    verificationNotes: v.optional(v.string()),
-    lastCheckedAt: v.string(),
-    lastVerifiedAt: v.optional(v.string()),
-  },
-  handler: async (ctx, { table, id, verificationStatus, verificationNotes, lastCheckedAt, lastVerifiedAt }) => {
-    const normalized = ctx.db.normalizeId(table, id);
-    if (!normalized) return;
-    const patch: Record<string, unknown> = {
-      verificationStatus,
-      verificationNotes,
-      lastCheckedAt,
-      updatedAt: lastCheckedAt,
+export const listForLinkCheck = internalQuery({
+  args: { which: v.union(v.literal('pending'), v.literal('verified')), limit: v.number() },
+  handler: async (ctx, { which, limit }) => {
+    const rows =
+      which === 'pending'
+        ? await ctx.db.query('scholarships').withIndex('by_verification', (q) => q.eq('verificationStatus', 'pending')).collect()
+        : await ctx.db.query('scholarships').withIndex('by_status_verification', (q) => q.eq('status', 'active').eq('verificationStatus', 'verified')).collect();
+    const cutoff = Date.now() - (which === 'pending' ? RECHECK_PENDING_AFTER_MS : REVALIDATE_VERIFIED_AFTER_MS);
+    const due = rows
+      .filter((r) => r.status === 'active')
+      .filter((r) => {
+        const t = which === 'pending' ? r.lastCheckedAt : (r.lastVerifiedAt ?? r.lastCheckedAt);
+        return !t || Date.parse(t) < cutoff;
+      })
+      .sort((a, b) => (a.lastCheckedAt ?? '').localeCompare(b.lastCheckedAt ?? ''));
+    return {
+      remaining: Math.max(0, due.length - limit),
+      docs: due.slice(0, limit).map((r) => ({ id: r._id, applicationUrl: r.applicationUrl, officialSourceUrl: r.officialSourceUrl })),
     };
-    if (lastVerifiedAt) patch.lastVerifiedAt = lastVerifiedAt;
-    await ctx.db.patch(normalized, patch);
   },
 });
 
-/**
- * Re-checks link reachability for every currently-verified, active listing
- * across both tables. A listing whose links stop resolving is moved back to
- * "pending" rather than silently staying verified forever. This keeps
- * "verified" meaning "checked recently". Scheduled weekly by cron.
- */
+export const applyLinkVerdict = internalMutation({
+  args: {
+    id: v.id('scholarships'),
+    verdict: v.union(v.literal('ok'), v.literal('reject'), v.literal('dead'), v.literal('transient')),
+    notes: v.optional(v.string()),
+  },
+  handler: async (ctx, { id, verdict, notes }) => {
+    const doc = await ctx.db.get(id);
+    if (!doc || doc.status !== 'active') return;
+    const now = new Date().toISOString();
+    if (verdict === 'ok') {
+      await ctx.db.patch(id, { verificationStatus: 'verified', verificationNotes: undefined, linkFailureCount: 0, lastCheckedAt: now, lastVerifiedAt: now, updatedAt: now });
+      return;
+    }
+    if (verdict === 'reject') {
+      await ctx.db.patch(id, { verificationStatus: 'rejected', verificationNotes: notes, lastCheckedAt: now, updatedAt: now });
+      return;
+    }
+    const failures = (doc.linkFailureCount ?? 0) + (verdict === 'dead' ? 2 : 1);
+    if (doc.verificationStatus === 'verified') {
+      // One bad check must not hide a good listing: demote only after repeated failures.
+      await ctx.db.patch(id, {
+        linkFailureCount: failures,
+        lastCheckedAt: now,
+        ...(failures >= DEMOTE_AT ? { verificationStatus: 'pending' as const, verificationNotes: `Demoted after repeated failed link checks. ${notes ?? ''}`, updatedAt: now } : {}),
+      });
+    } else if (Date.now() - Date.parse(doc.createdAt) > PENDING_GIVE_UP_MS) {
+      await ctx.db.patch(id, { verificationStatus: 'rejected', verificationNotes: `Links could not be verified within 14 days. ${notes ?? ''}`, linkFailureCount: failures, lastCheckedAt: now, updatedAt: now });
+    } else {
+      await ctx.db.patch(id, { verificationNotes: notes, linkFailureCount: failures, lastCheckedAt: now });
+    }
+  },
+});
 
-export const recheckPendingListings = internalAction({
+async function runChecks(ctx: any, docs: { id: string; applicationUrl: string; officialSourceUrl?: string }[]) {
+  for (let i = 0; i < docs.length; i += CHECK_CONCURRENCY) {
+    await Promise.all(
+      docs.slice(i, i + CHECK_CONCURRENCY).map(async (d) => {
+        const urls = [d.applicationUrl, d.officialSourceUrl].filter((u): u is string => !!u);
+        const result = await checkLinks([...new Set(urls)]);
+        await ctx.runMutation(internal.ingestion.applyLinkVerdict, { id: d.id, verdict: result.verdict, notes: 'notes' in result ? result.notes : undefined });
+      })
+    );
+  }
+}
+
+/** Link-checks pending listings; reschedules itself while more are due. */
+export const verifyPendingListings = internalAction({
   args: {},
   handler: async (ctx) => {
-    for (const table of ['scholarships', 'opportunities'] as const) {
-      const pending: any[] = await ctx.runQuery(internal.ingestion.listPendingForTable, { table });
-      for (const doc of pending) {
-        await ctx.runAction(internal.ingestion.checkReachabilityAndPromote, {
-          table,
-          id: doc._id,
-        });
-      }
-    }
+    const { docs, remaining } = await ctx.runQuery(internal.ingestion.listForLinkCheck, { which: 'pending', limit: CHECK_BATCH_LIMIT });
+    await runChecks(ctx, docs);
+    if (remaining > 0) await ctx.scheduler.runAfter(30_000, internal.ingestion.verifyPendingListings, {});
   },
 });
 
-export const listPendingForTable = internalQuery({
-  args: { table: v.union(v.literal('scholarships'), v.literal('opportunities')) },
-  handler: async (ctx, { table }) => {
-    return await ctx.db
-      .query(table)
-      .withIndex('by_verification', (q) => q.eq('verificationStatus', 'pending'))
-      .collect();
-  },
-});
-
+/** Re-checks verified listings (each at most weekly) so "verified" stays meaningful. */
 export const revalidateVerifiedListings = internalAction({
   args: {},
   handler: async (ctx) => {
-    for (const table of ['scholarships', 'opportunities'] as const) {
-      const verified: any[] = await ctx.runQuery(internal.ingestion.listVerifiedForTable, { table });
-      for (const doc of verified) {
-        await ctx.runAction(internal.ingestion.checkReachabilityAndPromote, { table, id: doc._id });
-      }
-    }
-  },
-});
-
-export const listVerifiedForTable = internalQuery({
-  args: { table: v.union(v.literal('scholarships'), v.literal('opportunities')) },
-  handler: async (ctx, { table }) => {
-    return await ctx.db
-      .query(table)
-      .withIndex('by_status_verification', (q) =>
-        q.eq('status', 'active').eq('verificationStatus', 'verified')
-      )
-      .collect();
+    const { docs } = await ctx.runQuery(internal.ingestion.listForLinkCheck, { which: 'verified', limit: CHECK_BATCH_LIMIT });
+    await runChecks(ctx, docs);
   },
 });

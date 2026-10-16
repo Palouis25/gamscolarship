@@ -1,40 +1,29 @@
+
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { ConvexProvider, ConvexReactClient } from 'convex/react';
 import App from './App.jsx';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
 import './index.css';
 
 const convexUrl = import.meta.env.VITE_CONVEX_URL?.trim();
 const root = ReactDOM.createRoot(document.getElementById('root'));
 
-if (!convexUrl) {
-  // Avoid initializing Convex with a fake URL, which causes a misleading
-  // "Couldn't parse deployment name placeholder" error.
+if (!/^https:\/\/.+\.convex\.cloud\/?$/.test(convexUrl || '')) {
   root.render(
-    <div
-      role="alert"
-      style={{
-        maxWidth: '680px',
-        margin: '12vh auto',
-        padding: '24px',
-        fontFamily: 'system-ui, sans-serif',
-        lineHeight: 1.6,
-      }}
-    >
+    <main className="container" style={{ padding: '64px 20px' }}>
       <h1>GamScholarship needs configuration</h1>
-      <p>The Convex deployment URL is missing, so scholarship data cannot load.</p>
       <p>
-        For local development, run <code>npx convex dev</code> in the project
-        folder and make sure it writes <code>VITE_CONVEX_URL</code> to{' '}
-        <code>.env.local</code>.
+        The Convex deployment URL is missing or invalid, so scholarship data
+        cannot load.
       </p>
       <p>
-        For the live site, add <code>VITE_CONVEX_URL</code> to the Vercel
-        project’s Environment Variables using the correct production Convex
-        deployment URL, then redeploy.
+        For local development, check <code>.env.local</code>. For the live site,
+        configure <code>VITE_CONVEX_URL</code> in Vercel using your production
+        Convex URL, then redeploy.
       </p>
-    </div>,
+    </main>,
   );
 } else {
   const convex = new ConvexReactClient(convexUrl);
@@ -43,7 +32,9 @@ if (!convexUrl) {
     <React.StrictMode>
       <ConvexProvider client={convex}>
         <BrowserRouter>
-          <App />
+          <ErrorBoundary>
+            <App />
+          </ErrorBoundary>
         </BrowserRouter>
       </ConvexProvider>
     </React.StrictMode>,

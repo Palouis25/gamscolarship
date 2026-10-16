@@ -5,10 +5,13 @@ node_modules
 dist
 dist-ssr
 
-# env files
+# env files (only .env.example is committed)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
+# convex local state
+.convex
 
 # editor
 .vscode/*

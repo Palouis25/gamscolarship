@@ -1,323 +1,145 @@
-// Automated discovery pipeline for the "official site" sources listed in
-// convex/sources/officialSiteSources.ts.
+// Tier 2: official-site discovery. Replaces the old Google Custom Search step
+// (that API is closed to new customers and shuts down on 2027-01-01).
 //
-//   Google Programmable Search (site-restricted) -> candidate page URLs
-//         v
-//   fetch each page, strip to text (htmlToText)
-//         v
-//   Anthropic API extracts ONE structured listing per page, or {found:false}
-//         v
-//   convex/ingestion.ts's ingestDiscovered -- same validation, duplicate
-//   check, and URL-reachability verification as every other source
+//   robots.txt + sitemap(s) of an allow-listed official domain
+//     -> candidate URLs (path suggests scholarship content, robots-allowed)
+//     -> fetch page text -> Anthropic extracts ONE listing or {found:false}
+//     -> ingestDiscovered (same validation, dedupe and link verification)
 //
-// This file is the only place that calls two external, keyed APIs (Google
-// Custom Search JSON API and the Anthropic Messages API). Both keys are
-// read from Convex environment variables and never touch the frontend.
-// If either key is missing, runDiscoveryForSource records why in the
-// `sources` table and returns early rather than throwing -- a missing key
-// on one source should never crash the whole cron run.
-//
-// Rate limiting: the free tier of the Google Custom Search JSON API is 100
-// queries/day. With ~7 sources x up to 2 queries each = ~14 queries per
-// run, running this weekly (see convex/crons.ts) uses a small fraction of
-// that and leaves headroom to add more sources later. Increase the cron
-// frequency only after checking your actual Google Cloud quota/billing.
+// Needs ANTHROPIC_API_KEY (optionally ANTHROPIC_MODEL). Without it each run
+// records a clear failure reason instead of silently doing nothing.
+// NOT verified against the live provider sites from the build environment
+// (no outbound access there); check `sources.lastError` after first runs.
 
 import { v } from 'convex/values';
-import { internalAction, internalMutation, internalQuery } from './_generated/server';
+import { internalAction, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { OFFICIAL_SITE_SOURCES } from './sources/officialSiteSources';
-import {
-  htmlToText,
-  buildExtractionPrompt,
-  parseExtractionResponse,
-  EXTRACTION_SYSTEM_PROMPT,
-} from './sources/officialSiteAdapter';
+import { htmlToText, buildExtractionPrompt, parseExtractionResponse, EXTRACTION_SYSTEM_PROMPT } from './sources/officialSiteAdapter';
+import { parseRobots, parseSitemap, pickCandidates } from './sources/sitemap';
+import { fetchWithRetry } from './lib/http';
 
-const MAX_RESULTS_PER_SOURCE = 6; // candidate pages per source per run -- keeps CSE + Anthropic usage predictable
-const FETCH_TIMEOUT_MS = 10000;
-const ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+const MAX_PAGES_PER_SOURCE = 8;
+const MAX_CHILD_SITEMAPS = 5;
+const MAX_SITEMAP_CHARS = 5_000_000;
+const REFRESH_AFTER_MS = 14 * 24 * 3600 * 1000;
+const DEFAULT_MODEL = 'claude-sonnet-5-5';
 
-type CseResult = { url: string; title: string };
-
-async function searchGoogleCse(
-  domain: string,
-  query: string,
-  apiKey: string,
-  cseId: string
-): Promise<CseResult[]> {
-  const params = new URLSearchParams({
-    key: apiKey,
-    cx: cseId,
-    q: query,
-    siteSearch: domain,
-    siteSearchFilter: 'i',
-    num: '10',
-  });
-  const res = await fetch(`https://www.googleapis.com/customsearch/v1?${params.toString()}`);
-  if (!res.ok) {
-    throw new Error(`Google Custom Search API responded with status ${res.status}`);
-  }
-  const data: any = await res.json();
-  const items = Array.isArray(data.items) ? data.items : [];
-  return items
-    .map((item: any) => ({ url: item.link as string, title: (item.title as string) ?? '' }))
-    .filter((r: CseResult) => typeof r.url === 'string' && r.url.startsWith('http'));
-}
-
-async function fetchPageText(url: string): Promise<string | null> {
+async function getText(url: string, max = MAX_SITEMAP_CHARS): Promise<string | null> {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-    const res = await fetch(url, { redirect: 'follow', signal: controller.signal });
-    clearTimeout(timeout);
+    const res = await fetchWithRetry(url, { redirect: 'follow' }, { tries: 2 });
     if (!res.ok) return null;
-    const contentType = res.headers.get('content-type') ?? '';
-    if (!contentType.includes('text/html') && !contentType.includes('text/plain')) return null;
-    const html = await res.text();
-    return htmlToText(html);
+    return (await res.text()).slice(0, max);
   } catch {
     return null;
   }
 }
 
-async function extractListingFromPage(
-  pageUrl: string,
-  pageText: string,
-  sourceLabel: string,
-  sourceName: string,
-  anthropicApiKey: string
-) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': anthropicApiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 1200,
-      system: EXTRACTION_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: buildExtractionPrompt(pageText, pageUrl, sourceLabel) }],
-    }),
-  });
-  if (!res.ok) {
-    throw new Error(`Anthropic API responded with status ${res.status}`);
+async function collectUrls(domain: string): Promise<{ urls: string[]; disallow: string[]; error?: string }> {
+  const origin = `https://${domain}`;
+  const robots = parseRobots((await getText(`${origin}/robots.txt`, 100_000)) ?? '');
+  const roots = robots.sitemaps.length ? robots.sitemaps : [`${origin}/sitemap.xml`];
+  const urls: string[] = [];
+  let children = 0;
+  for (const root of roots.slice(0, 3)) {
+    const xml = await getText(root);
+    if (!xml) continue;
+    const parsed = parseSitemap(xml);
+    urls.push(...parsed.urls);
+    for (const child of parsed.sitemaps) {
+      if (children++ >= MAX_CHILD_SITEMAPS) break;
+      const cx = await getText(child);
+      if (cx) urls.push(...parseSitemap(cx).urls);
+    }
   }
-  const data: any = await res.json();
-  const textBlock = (data.content ?? []).find((b: any) => b.type === 'text');
-  if (!textBlock) return { found: false as const };
-  return parseExtractionResponse(textBlock.text, sourceName, pageUrl);
+  return urls.length ? { urls, disallow: robots.disallow } : { urls, disallow: robots.disallow, error: `No sitemap URLs found for ${domain}.` };
 }
 
-/**
- * Runs discovery for a single source: search -> fetch -> extract -> ingest.
- * Always records a result to the `sources` table and an `ingestionRuns`
- * row, whether it succeeds, partially succeeds, or fails outright -- so a
- * source that's silently broken shows up rather than just going quiet.
- */
-export const runDiscoveryForSource = internalAction({
-  args: { slug: v.string() },
-  handler: async (ctx, { slug }) => {
-    const source = OFFICIAL_SITE_SOURCES.find((s) => s.slug === slug);
-    const startedAt = new Date().toISOString();
-    if (!source) {
-      await ctx.runMutation(internal.discovery.recordRunResult, {
-        sourceName: slug,
-        startedAt,
-        status: 'failed',
-        retrieved: 0,
-        accepted: 0,
-        rejected: 0,
-        error: `Unknown source slug "${slug}" -- not present in officialSiteSources.ts.`,
-      });
-      return;
+async function extract(pageUrl: string, text: string, label: string, slug: string, key: string) {
+  const res = await fetchWithRetry('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: process.env.ANTHROPIC_MODEL || DEFAULT_MODEL,
+      max_tokens: 1200,
+      system: EXTRACTION_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: buildExtractionPrompt(text, pageUrl, label) }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Anthropic API responded with status ${res.status}`);
+  const data: any = await res.json();
+  const block = (data.content ?? []).find((b: any) => b.type === 'text');
+  return block ? parseExtractionResponse(block.text, slug, pageUrl) : ({ found: false } as const);
+}
+
+/** Of `urls`, those not checked within REFRESH_AFTER_MS (new pages first). */
+export const dueUrls = internalQuery({
+  args: { sourceName: v.string(), urls: v.array(v.string()) },
+  handler: async (ctx, { sourceName, urls }) => {
+    const cutoff = Date.now() - REFRESH_AFTER_MS;
+    const due: string[] = [];
+    for (const url of urls) {
+      const row = await ctx.db.query('scholarships').withIndex('by_source', (q) => q.eq('sourceName', sourceName).eq('sourceId', url)).first();
+      if (!row) due.unshift(url);
+      else if (!row.lastCheckedAt || Date.parse(row.lastCheckedAt) < cutoff) due.push(url);
     }
-
-    const googleApiKey = process.env.GOOGLE_API_KEY;
-    const googleCseId = process.env.GOOGLE_CSE_ID;
-    const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-
-    if (!googleApiKey || !googleCseId) {
-      await ctx.runMutation(internal.discovery.recordRunResult, {
-        sourceName: source.slug,
-        startedAt,
-        status: 'failed',
-        retrieved: 0,
-        accepted: 0,
-        rejected: 0,
-        error: 'GOOGLE_API_KEY / GOOGLE_CSE_ID not configured on this Convex deployment.',
-      });
-      return;
-    }
-    if (!anthropicApiKey) {
-      await ctx.runMutation(internal.discovery.recordRunResult, {
-        sourceName: source.slug,
-        startedAt,
-        status: 'failed',
-        retrieved: 0,
-        accepted: 0,
-        rejected: 0,
-        error: 'ANTHROPIC_API_KEY not configured on this Convex deployment.',
-      });
-      return;
-    }
-
-    let retrieved = 0;
-    let accepted = 0;
-    let rejected = 0;
-    const errors: string[] = [];
-
-    try {
-      const seenUrls = new Set<string>();
-      const candidates: CseResult[] = [];
-      for (const query of source.searchQueries) {
-        if (candidates.length >= MAX_RESULTS_PER_SOURCE) break;
-        try {
-          const results = await searchGoogleCse(source.domain, query, googleApiKey, googleCseId);
-          for (const r of results) {
-            if (!seenUrls.has(r.url) && candidates.length < MAX_RESULTS_PER_SOURCE) {
-              seenUrls.add(r.url);
-              candidates.push(r);
-            }
-          }
-        } catch (err) {
-          errors.push(`search "${query}": ${(err as Error).message}`);
-        }
-      }
-
-      retrieved = candidates.length;
-
-      for (const candidate of candidates) {
-        const pageText = await fetchPageText(candidate.url);
-        if (!pageText || pageText.length < 200) {
-          rejected++;
-          continue;
-        }
-
-        let extraction;
-        try {
-          extraction = await extractListingFromPage(
-            candidate.url,
-            pageText,
-            source.label,
-            source.slug,
-            anthropicApiKey
-          );
-        } catch (err) {
-          errors.push(`extract ${candidate.url}: ${(err as Error).message}`);
-          rejected++;
-          continue;
-        }
-
-        if (!extraction.found) {
-          rejected++;
-          continue;
-        }
-
-        try {
-          const result: any = await ctx.runMutation(internal.ingestion.ingestDiscovered, {
-            listing: extraction.listing,
-          });
-          if (result?.verificationStatus === 'rejected') {
-            rejected++;
-          } else {
-            accepted++;
-          }
-        } catch (err) {
-          errors.push(`ingest ${candidate.url}: ${(err as Error).message}`);
-          rejected++;
-        }
-      }
-    } catch (err) {
-      errors.push((err as Error).message);
-    }
-
-    const status = errors.length === 0 ? 'success' : accepted > 0 ? 'partial' : 'failed';
-    await ctx.runMutation(internal.discovery.recordRunResult, {
-      sourceName: source.slug,
-      startedAt,
-      status,
-      retrieved,
-      accepted,
-      rejected,
-      error: errors.length > 0 ? errors.slice(0, 5).join(' | ') : undefined,
-    });
+    return due;
   },
 });
 
-/**
- * Loops every enabled source and runs discovery for each in turn. Enabled
- * is read from the `sources` table (see scripts/setupSources.mjs), not
- * hardcoded here, so a source can be paused (e.g. it's failing repeatedly,
- * or its terms changed) with `ensureSource`/a dashboard edit rather than a
- * code change. Sources not yet registered in the table are skipped -- run
- * scripts/setupSources.mjs once after deploying to register the curated
- * list from officialSiteSources.ts.
- */
+export const runDiscoveryForSource = internalAction({
+  args: { slug: v.string() },
+  handler: async (ctx, { slug }): Promise<void> => {
+    const source = OFFICIAL_SITE_SOURCES.find((s) => s.slug === slug);
+    const startedAt = new Date().toISOString();
+    const record = async (status: 'success' | 'partial' | 'failed', retrieved: number, accepted: number, rejected: number, error?: string): Promise<void> => {
+      await ctx.runMutation(internal.sourceRegistry.recordRunResult, { sourceName: slug, startedAt, status, retrieved, accepted, rejected, error });
+    };
+
+    if (!source) return record('failed', 0, 0, 0, `Unknown source "${slug}".`);
+    const key = process.env.ANTHROPIC_API_KEY;
+    if (!key) return record('failed', 0, 0, 0, 'ANTHROPIC_API_KEY is not set on this Convex deployment.');
+
+    const { urls, disallow, error } = await collectUrls(source.domain);
+    if (error) return record('failed', 0, 0, 0, error);
+    const candidates = pickCandidates(urls, source.domain, disallow);
+    const due: string[] = await ctx.runQuery(internal.discovery.dueUrls, { sourceName: slug, urls: candidates.slice(0, 200) });
+    const batch = due.slice(0, MAX_PAGES_PER_SOURCE);
+
+    let accepted = 0, rejected = 0;
+    const errors: string[] = [];
+    for (const url of batch) {
+      const html = await getText(url, 2_000_000);
+      const text = html ? htmlToText(html) : '';
+      if (text.length < 200) { rejected++; continue; }
+      try {
+        const ex = await extract(url, text, source.label, slug, key);
+        if (!ex.found) { rejected++; continue; }
+        const r: any = await ctx.runMutation(internal.ingestion.ingestDiscovered, { listing: ex.listing });
+        if (['inserted', 'updated', 'unchanged'].includes(r.outcome)) accepted++;
+        else rejected++;
+      } catch (err) {
+        errors.push(`${url}: ${(err as Error).message}`);
+        rejected++;
+      }
+    }
+    const status = errors.length === 0 ? 'success' : accepted > 0 ? 'partial' : 'failed';
+    await record(status, batch.length, accepted, rejected, errors.slice(0, 5).join(' | ') || undefined);
+    if (accepted > 0) await ctx.scheduler.runAfter(0, internal.ingestion.verifyPendingListings, {});
+  },
+});
+
+/** Schedules each enabled source as its own action (staggered), so one slow
+ *  site cannot exhaust a single action's time limit. */
 export const runAllDiscovery = internalAction({
   args: {},
   handler: async (ctx) => {
-    const enabledNames: string[] = await ctx.runQuery(internal.discovery.listEnabledSourceNames, {});
-    for (const slug of OFFICIAL_SITE_SOURCES.map((s) => s.slug)) {
-      if (!enabledNames.includes(slug)) continue;
-      await ctx.runAction(internal.discovery.runDiscoveryForSource, { slug });
+    await ctx.runMutation(internal.sourceRegistry.ensureSources, {});
+    const enabled: string[] = await ctx.runQuery(internal.sourceRegistry.listEnabledSourceNames, {});
+    let i = 0;
+    for (const s of OFFICIAL_SITE_SOURCES) {
+      if (!enabled.includes(s.slug)) continue;
+      await ctx.scheduler.runAfter(i++ * 90_000, internal.discovery.runDiscoveryForSource, { slug: s.slug });
     }
-  },
-});
-
-export const listEnabledSourceNames = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    const all = await ctx.db.query('sources').collect();
-    return all.filter((s) => s.enabled).map((s) => s.name);
-  },
-});
-
-export const recordRunResult = internalMutation({
-  args: {
-    sourceName: v.string(),
-    startedAt: v.string(),
-    status: v.union(v.literal('success'), v.literal('partial'), v.literal('failed')),
-    retrieved: v.number(),
-    accepted: v.number(),
-    rejected: v.number(),
-    error: v.optional(v.string()),
-  },
-  handler: async (ctx, { sourceName, startedAt, status, retrieved, accepted, rejected, error }) => {
-    const finishedAt = new Date().toISOString();
-    await ctx.db.insert('ingestionRuns', {
-      sourceName,
-      startedAt,
-      finishedAt,
-      status,
-      retrieved,
-      accepted,
-      rejected,
-      error,
-    });
-
-    const existing = await ctx.db
-      .query('sources')
-      .withIndex('by_name', (q) => q.eq('name', sourceName))
-      .unique();
-    if (!existing) return; // source not registered yet -- run result is still logged above
-
-    const patch: Record<string, unknown> = {
-      lastRunAt: finishedAt,
-      lastRunStats: { retrieved, accepted, rejected },
-    };
-    if (status === 'failed') {
-      patch.lastFailureAt = finishedAt;
-      patch.lastError = error;
-      patch.consecutiveFailures = ((existing as any).consecutiveFailures ?? 0) + 1;
-    } else {
-      patch.lastSuccessAt = finishedAt;
-      patch.consecutiveFailures = 0;
-      if (status === 'partial') patch.lastError = error;
-      else patch.lastError = undefined;
-    }
-    await ctx.db.patch(existing._id, patch);
   },
 });

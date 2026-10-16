@@ -1,62 +1,65 @@
-import { useParams, Link, Navigate } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { useQuery } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import Seo from '../components/Seo.jsx';
+import { LoadingGrid, StatusBox } from '../components/StatusMessage.jsx';
+import { describeDeadline, formatDate, hostname } from '../lib/format.js';
 import './ScholarshipDetails.css';
 
-function formatDeadline(dateStr) {
-  const date = new Date(dateStr);
-  if (Number.isNaN(date.getTime())) return dateStr;
-  return date.toLocaleDateString('en-GB', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  });
+function Section({ title, items }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <>
+      <h2>{title}</h2>
+      <ul>
+        {items.map((item, i) => (
+          <li key={`${i}-${item}`}>{item}</li>
+        ))}
+      </ul>
+    </>
+  );
 }
 
 export default function ScholarshipDetails() {
   const { id } = useParams();
   const scholarship = useQuery(api.scholarships.getById, { id });
 
-  // Still loading
   if (scholarship === undefined) {
     return (
       <section className="section">
+        <div className="container"><LoadingGrid count={1} label="Loading scholarship" /></div>
+      </section>
+    );
+  }
+
+  if (scholarship === null) {
+    return (
+      <section className="section">
         <div className="container">
-          <p>Loading...</p>
+          <Seo title="Scholarship not available | GamScholarship" description="This scholarship is no longer listed." noIndex />
+          <StatusBox
+            title="This scholarship isn't available"
+            action={<Link to="/scholarships" className="btn btn-primary">Browse scholarships</Link>}
+          >
+            It may have closed, been removed, or the link may be incorrect.
+          </StatusBox>
         </div>
       </section>
     );
   }
 
-  // Not found (invalid id, or it was deleted)
-  if (scholarship === null) {
-    return <Navigate to="/404" replace />;
-  }
-
-  const {
-    title,
-    organization,
-    country,
-    level,
-    funding,
-    field,
-    deadline,
-    description,
-    eligibility,
-    requirements,
-    benefits,
-    applicationUrl,
-    isSample,
-  } = scholarship;
+  const { title, organization, country, level, funding, field, deadline, description, eligibility, requirements, benefits, applicationUrl, isSample, lastVerifiedAt } = scholarship;
+  const d = describeDeadline(deadline, { long: true });
+  const host = hostname(applicationUrl);
+  const checked = lastVerifiedAt ? formatDate(lastVerifiedAt) : '';
 
   return (
     <>
-      <Seo title={`${title} | GamScholarship`} description={description} />
+      <Seo title={`${title} | GamScholarship`} description={description.slice(0, 160)} />
 
       <section className="page-header">
         <div className="container">
-          <Link to="/scholarships" className="back-link">&larr; Back to Scholarships</Link>
+          <Link to="/scholarships" className="back-link">&larr; Back to scholarships</Link>
           <h1>{title}</h1>
           <p>{organization} &middot; {country}</p>
         </div>
@@ -66,56 +69,43 @@ export default function ScholarshipDetails() {
         <div className="container details-layout">
           <div className="details-main">
             {isSample && (
-              <div className="sample-notice">
-                This is sample/demo data included to demonstrate the site layout.
-                Verify details on the official source before applying.
+              <div className="sample-notice" role="note">
+                The details below (especially the deadline) have not yet been confirmed against the
+                official page. Please check the official site before you plan your application.
               </div>
             )}
 
             <h2>Overview</h2>
             <p>{description}</p>
-
-            <h2>Eligibility</h2>
-            <ul>
-              {eligibility.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-
-            <h2>Requirements</h2>
-            <ul>
-              {requirements.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-
-            <h2>Benefits</h2>
-            <ul>
-              {benefits.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+            <Section title="Eligibility" items={eligibility} />
+            <Section title="Requirements" items={requirements} />
+            <Section title="Benefits" items={benefits} />
           </div>
 
-          <aside className="details-sidebar card">
+          <aside className="details-sidebar card" aria-label="Scholarship summary">
             <dl className="details-facts">
-              <dt>Degree Level</dt>
+              <dt>Application deadline</dt>
+              <dd>
+                {d.label}
+                {d.note && <span className={`deadline-chip deadline-${d.tone}`}>{d.note}</span>}
+              </dd>
+              <dt>Degree level</dt>
               <dd>{level}</dd>
-              <dt>Field of Study</dt>
+              <dt>Field of study</dt>
               <dd>{field}</dd>
-              <dt>Funding Type</dt>
+              <dt>Funding</dt>
               <dd>{funding}</dd>
-              <dt>Application Deadline</dt>
-              <dd>{formatDeadline(deadline)}</dd>
+              <dt>Destination</dt>
+              <dd>{country}</dd>
             </dl>
-            <a
-              href={applicationUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn btn-accent btn-block"
-            >
-              Apply Now
+            <a href={applicationUrl} target="_blank" rel="noopener noreferrer" className="btn btn-accent btn-block">
+              Go to official page<span className="visually-hidden"> (opens in a new tab)</span>
             </a>
+            <p className="details-note">
+              {host && <>Opens <strong>{host}</strong>. </>}
+              {checked && <>Link last checked {checked}. </>}
+              Always confirm the deadline and eligibility on the official page.
+            </p>
           </aside>
         </div>
       </section>

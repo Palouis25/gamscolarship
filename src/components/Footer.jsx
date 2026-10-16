@@ -10,7 +10,7 @@ export default function Footer() {
         <div>
           <div className="footer-brand">GamScholarship</div>
           <p className="footer-text">
-            Helping students discover verified scholarship opportunities from around the world.
+            Helping students find scholarships worldwide, with links to the official application pages.
           </p>
         </div>
 

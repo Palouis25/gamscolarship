@@ -1,34 +1,45 @@
+import { v } from 'convex/values';
 import { internalMutation } from './_generated/server';
+import { internal } from './_generated/api';
+import { isExpired } from './lib/deadline';
 
-/**
- * Flips any scholarship/opportunity whose deadline has passed from
- * "active" to "expired". Only touches entries with a real ISO date in
- * `deadline` (YYYY-MM-DD) — entries like "Varies by country..." are left
- * alone since there's no single date to compare against.
- *
- * Wired up to run daily by convex/crons.ts. This keeps the site from
- * showing lapsed opportunities as open, but it does NOT discover or add
- * new listings — that still requires a source (see convex/ingestion.ts's
- * ingestManual, or a future adapter under convex/sources/) to bring in
- * new, verified opportunities.
- */
+/** Marks active listings whose (real-date) deadline has passed as expired.
+ *  Descriptive deadlines ("Varies by country") are left alone. */
 export const expireStaleListings = internalMutation({
   args: {},
   handler: async (ctx) => {
-    const today = new Date().toISOString().slice(0, 10);
-    const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
-
-    for (const table of ['scholarships', 'opportunities'] as const) {
-      const activeItems = await ctx.db
-        .query(table)
-        .withIndex('by_status', (q) => q.eq('status', 'active'))
-        .collect();
-
-      for (const item of activeItems) {
-        if (isoDatePattern.test(item.deadline) && item.deadline < today) {
-          await ctx.db.patch(item._id, { status: 'expired', updatedAt: new Date().toISOString() });
-        }
+    const active = await ctx.db.query('scholarships').withIndex('by_status', (q) => q.eq('status', 'active')).collect();
+    let expired = 0;
+    for (const s of active) {
+      if (isExpired(s.deadline)) {
+        await ctx.db.patch(s._id, { status: 'expired', updatedAt: new Date().toISOString() });
+        expired++;
       }
     }
+    return { expired };
+  },
+});
+
+/** Keeps the ingestionRuns diagnostics table from growing forever. */
+export const pruneIngestionRuns = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const cutoff = new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString();
+    const old = await ctx.db.query('ingestionRuns').filter((q) => q.lt(q.field('startedAt'), cutoff)).take(500);
+    for (const r of old) await ctx.db.delete(r._id);
+    return { deleted: old.length };
+  },
+});
+
+/** One-off clean-up of the retired `opportunities` table:
+ *  `npx convex run maintenance:purgeLegacyOpportunities` (repeat until remaining is 0). */
+export const purgeLegacyOpportunities = internalMutation({
+  args: { batch: v.optional(v.number()) },
+  handler: async (ctx, { batch }) => {
+    const rows = await ctx.db.query('opportunities').take(batch ?? 200);
+    for (const r of rows) await ctx.db.delete(r._id);
+    const more = await ctx.db.query('opportunities').first();
+    if (more) await ctx.scheduler.runAfter(0, internal.maintenance.purgeLegacyOpportunities, { batch });
+    return { deleted: rows.length, remaining: more ? 'more (rescheduled)' : 0 };
   },
 });

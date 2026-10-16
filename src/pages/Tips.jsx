@@ -68,9 +68,9 @@ export default function Tips() {
         <div className="container">
           <h1>Preparing Your Application</h1>
           <p>
-            General guidance on getting scholarship-ready. This isn't
+            General guidance on getting scholarship-ready. This isn&apos;t
             specific to any one program &mdash; always follow the exact
-            requirements listed on each scholarship's official page.
+            requirements listed on each scholarship&apos;s official page.
           </p>
         </div>
       </section>

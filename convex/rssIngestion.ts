@@ -1,108 +1,81 @@
-// Sync for the Erasmus Mundus Catalogue RSS feed (see
-// convex/sources/erasmusMundusAdapter.ts for what the feed is and why it's
-// trusted). This is GamScholarship's highest-priority automated source:
-// an official EU government feed that needs zero API keys, so it runs
-// out of the box on a fresh deployment -- unlike convex/discovery.ts's
-// Google-CSE-plus-Anthropic fallback, which only fires for domains that
-// don't publish a feed like this one.
+// Tier 1 source: the Erasmus Mundus Catalogue RSS feed published by EACEA
+// (European Commission). See sources/erasmusMundusAdapter.ts for what the
+// feed contains. No credentials are needed.
 //
-//   RSS feed (paginated) -> parseRssFeed -> normalizeErasmusMundusItem
-//        -> convex/ingestion.ts's ingestDiscovered (same validation +
-//           duplicate-check + reachability pipeline as every other source)
+//   RSS pages -> parseRssFeed -> normalizeErasmusMundusItem -> ingestDiscovered
 //
-// Pagination: the feed is a Drupal Views RSS export, which conventionally
-// supports `?page=N`. This has NOT been confirmed against every possible
-// page (only page 0, fetched directly, was confirmed while building this
-// adapter) -- runSync defends against that uncertainty by stopping the
-// moment a page returns zero new items or a non-200 response, rather than
-// assuming a fixed page count. Worst case if pagination isn't supported:
-// every "page" returns the same ~20 most-recent items, which just means
-// wasted fetches, not incorrect data -- duplicate detection in
-// convex/ingestion.ts (matched by sourceId = the programme's own URL)
-// makes repeats a no-op re-ingest rather than a duplicate listing.
+// Pagination (`?page=N`) is the conventional Drupal Views parameter but has
+// not been confirmed against the live feed; the loop stops on the first
+// empty page, a repeated page, or a 404, so a wrong assumption only costs a
+// few requests. A failed FIRST page is recorded as a failed run (it used to
+// be recorded as a successful run with zero items).
 
-import { v } from 'convex/values';
 import { internalAction } from './_generated/server';
 import { internal } from './_generated/api';
 import { parseRssFeed, normalizeErasmusMundusItem } from './sources/erasmusMundusAdapter';
+import { ERASMUS_SOURCE } from './sources/registry';
+import { fetchWithRetry } from './lib/http';
 
-const FEED_URL = 'https://www.eacea.ec.europa.eu/node/253/rss_en';
-const MAX_PAGES = 6; // ~20 items/page -> up to ~120 programmes per run
-const FETCH_TIMEOUT_MS = 15000;
-const SOURCE_NAME = 'erasmus-mundus-catalogue-rss';
-
-async function fetchPage(page: number): Promise<string | null> {
-  const url = page === 0 ? FEED_URL : `${FEED_URL}?page=${page}`;
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-    const res = await fetch(url, { redirect: 'follow', signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
-    return await res.text();
-  } catch {
-    return null;
-  }
-}
+export const FEED_URL = 'https://www.eacea.ec.europa.eu/node/253/rss_en';
+const MAX_PAGES = 15;
 
 export const runErasmusMundusSync = internalAction({
   args: {},
   handler: async (ctx) => {
-    const enabledNames: string[] = await ctx.runQuery(internal.discovery.listEnabledSourceNames, {});
-    if (!enabledNames.includes(SOURCE_NAME)) return; // not registered/enabled -- see scripts/setupSources.mjs
+    await ctx.runMutation(internal.sourceRegistry.ensureSources, {});
+    const enabled: string[] = await ctx.runQuery(internal.sourceRegistry.listEnabledSourceNames, {});
+    if (!enabled.includes(ERASMUS_SOURCE)) return { skipped: 'source disabled' };
 
     const startedAt = new Date().toISOString();
-    let retrieved = 0;
-    let accepted = 0;
-    let rejected = 0;
+    let retrieved = 0, accepted = 0, rejected = 0;
     const errors: string[] = [];
-    const seenGuids = new Set<string>();
+    const seen = new Set<string>();
 
-    try {
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const xml = await fetchPage(page);
-        if (!xml) break; // end of pagination, or the page param isn't supported -- stop rather than guess further
-
-        let items;
-        try {
-          items = parseRssFeed(xml);
-        } catch (err) {
-          errors.push(`parse page ${page}: ${(err as Error).message}`);
+    for (let page = 0; page < MAX_PAGES; page++) {
+      let xml: string;
+      try {
+        const res = await fetchWithRetry(page === 0 ? FEED_URL : `${FEED_URL}?page=${page}`, { redirect: 'follow' });
+        if (res.status === 404 && page > 0) break; // end of pagination
+        if (!res.ok) {
+          errors.push(`feed page ${page}: HTTP ${res.status}`);
           break;
         }
-        if (items.length === 0) break;
+        xml = await res.text();
+      } catch (err) {
+        errors.push(`feed page ${page}: ${(err as Error).message}`);
+        break;
+      }
 
-        const newItems = items.filter((i) => !seenGuids.has(i.guid));
-        if (newItems.length === 0) break; // same items again -> pagination isn't advancing; stop
-        for (const item of newItems) seenGuids.add(item.guid);
+      let items;
+      try {
+        items = parseRssFeed(xml);
+      } catch (err) {
+        errors.push(`parse page ${page}: ${(err as Error).message}`);
+        break;
+      }
+      const fresh = items.filter((i) => !seen.has(i.guid));
+      if (fresh.length === 0) break; // empty or repeated page: pagination exhausted
+      fresh.forEach((i) => seen.add(i.guid));
+      retrieved += fresh.length;
 
-        retrieved += newItems.length;
-
-        for (const item of newItems) {
-          try {
-            const listing = normalizeErasmusMundusItem(item);
-            const result: any = await ctx.runMutation(internal.ingestion.ingestDiscovered, { listing });
-            if (result?.verificationStatus === 'rejected') rejected++;
-            else accepted++;
-          } catch (err) {
-            errors.push(`ingest ${item.guid}: ${(err as Error).message}`);
-            rejected++;
-          }
+      for (const item of fresh) {
+        try {
+          const r: any = await ctx.runMutation(internal.ingestion.ingestDiscovered, { listing: normalizeErasmusMundusItem(item) });
+          if (['inserted', 'updated', 'unchanged'].includes(r.outcome)) accepted++;
+          else rejected++;
+        } catch (err) {
+          errors.push(`ingest ${item.guid}: ${(err as Error).message}`);
+          rejected++;
         }
       }
-    } catch (err) {
-      errors.push((err as Error).message);
     }
 
-    const status = errors.length === 0 ? 'success' : accepted > 0 ? 'partial' : 'failed';
-    await ctx.runMutation(internal.discovery.recordRunResult, {
-      sourceName: SOURCE_NAME,
-      startedAt,
-      status,
-      retrieved,
-      accepted,
-      rejected,
-      error: errors.length > 0 ? errors.slice(0, 5).join(' | ') : undefined,
+    const status = retrieved === 0 ? 'failed' : errors.length === 0 ? 'success' : 'partial';
+    await ctx.runMutation(internal.sourceRegistry.recordRunResult, {
+      sourceName: ERASMUS_SOURCE, startedAt, status, retrieved, accepted, rejected,
+      error: retrieved === 0 && errors.length === 0 ? 'Feed returned no items.' : errors.length ? errors.slice(0, 5).join(' | ') : undefined,
     });
+    if (accepted > 0) await ctx.scheduler.runAfter(0, internal.ingestion.verifyPendingListings, {});
+    return { status, retrieved, accepted, rejected };
   },
 });
