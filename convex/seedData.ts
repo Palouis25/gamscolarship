@@ -1,16 +1,19 @@
-// Seed data for the Convex `scholarships` and `opportunities` tables.
-// Run with: node scripts/seed.mjs (see README for setup).
+// Curated scholarship entries (the "manual" source), run through the normal
+// validation + automatic link-check pipeline by `npx convex run seed:run`.
 //
-// Every entry lists a real organization/program. Deadlines are either a
-// specific ISO date (verified at the time noted in sourceCheckedAt) or a
-// short description when the program sets deadlines per country/institution
-// rather than one global date. isSample:false = a real, currently-running
-// program; isSample:true = kept as illustrative/demo. Nothing here is
-// invented — verify current details on the linked official page before
-// relying on this for an actual application, since cycles/deadlines move
-// year to year.
+// IMPORTANT: `isSample: true` entries are real programmes whose details
+// (especially deadlines) have NOT been re-confirmed against the official
+// page; the site shows them with a "details not confirmed" notice. Re-check
+// one against its official page and set isSample to false to remove the
+// notice. Deadlines move every year.
 
-export const scholarships = [
+type Seed = {
+  title: string; organization: string; country: string; level: string; funding: string; field: string;
+  deadline: string; description: string; eligibility: string[]; requirements: string[]; benefits: string[];
+  applicationUrl: string; isSample: boolean;
+};
+
+export const scholarships: Seed[] = [
   {
     title: 'Chevening Scholarships',
     organization: 'UK Government (FCDO)',
@@ -19,7 +22,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'All fields',
     deadline: '2026-11-03',
-    status: 'active',
     description:
       "A UK government global scholarship programme funding one-year master's degrees for future leaders, including applicants from The Gambia.",
     eligibility: [
@@ -35,7 +37,6 @@ export const scholarships = [
     benefits: ['Full tuition fees', 'Monthly stipend', 'Travel costs to and from the UK'],
     applicationUrl: 'https://www.chevening.org/',
     isSample: true,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'Mastercard Foundation Scholars Program',
@@ -45,7 +46,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'All fields',
     deadline: '2027-01-15',
-    status: 'active',
     description:
       'Supports academically talented but economically disadvantaged young people from Africa to access quality secondary and university education.',
     eligibility: ['Demonstrated financial need', 'Strong academic record', 'Commitment to giving back to community'],
@@ -53,7 +53,6 @@ export const scholarships = [
     benefits: ['Tuition and fees', 'Accommodation and living stipend', 'Mentorship and leadership training'],
     applicationUrl: 'https://mastercardfdn.org/all/scholars/',
     isSample: true,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'DAAD Scholarships for Development-Related Postgraduate Courses',
@@ -63,7 +62,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'Development, Economics, Engineering',
     deadline: '2026-10-31',
-    status: 'active',
     description:
       'Funds postgraduate study in Germany for students from developing countries in fields relevant to development policy.',
     eligibility: [
@@ -75,7 +73,6 @@ export const scholarships = [
     benefits: ['Monthly stipend', 'Health, accident, and personal liability insurance', 'Travel allowance'],
     applicationUrl: 'https://www.daad.de/en/',
     isSample: true,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'Turkiye Burslari (Turkey Scholarships)',
@@ -85,7 +82,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'All fields',
     deadline: '2027-02-20',
-    status: 'active',
     description:
       'A government scholarship covering tuition, accommodation, and living costs for international students, including from The Gambia, to study in Turkey.',
     eligibility: ['Meet minimum academic requirements for the chosen level', 'Meet age limits set for each study level'],
@@ -99,7 +95,6 @@ export const scholarships = [
     ],
     applicationUrl: 'https://www.turkiyeburslari.gov.tr/',
     isSample: true,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'Australia Awards Scholarships',
@@ -109,7 +104,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'All fields',
     deadline: '2026-12-01',
-    status: 'active',
     description:
       'Long-term development scholarships administered by the Australian Government for students from eligible partner countries.',
     eligibility: ['Citizen of an eligible partner country', 'Meet the minimum entry requirements for study in Australia'],
@@ -117,7 +111,6 @@ export const scholarships = [
     benefits: ['Full tuition fees', 'Return air travel', 'Establishment allowance', 'Living expenses'],
     applicationUrl: 'https://www.dfat.gov.au/people-to-people/australia-awards',
     isSample: true,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'Commonwealth Shared Scholarships',
@@ -127,7 +120,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'Development-related fields',
     deadline: '2026-11-20',
-    status: 'active',
     description:
       "Funded master's study in the UK for students from developing Commonwealth countries who would not otherwise be able to study in the UK.",
     eligibility: [
@@ -138,7 +130,6 @@ export const scholarships = [
     benefits: ['Tuition fees', 'Return airfare', 'Monthly stipend'],
     applicationUrl: 'https://cscuk.fcdo.gov.uk/scholarships/commonwealth-shared-scholarships/',
     isSample: true,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'Fulbright Foreign Student Program',
@@ -148,7 +139,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'All fields (except clinical medicine)',
     deadline: 'Varies by country — check your local U.S. Embassy/Fulbright Commission',
-    status: 'active',
     description:
       "Flagship U.S. government exchange program funding graduate study and research in the United States. Application deadlines are set individually by each country's U.S. Embassy or Fulbright Commission, so exact dates vary widely (commonly between February and October).",
     eligibility: [
@@ -164,7 +154,6 @@ export const scholarships = [
     benefits: ['Tuition and fees', 'Monthly living stipend', 'Round-trip airfare', 'Health insurance'],
     applicationUrl: 'https://foreign.fulbrightonline.org/',
     isSample: false,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'MEXT Scholarship (Embassy Recommendation)',
@@ -174,7 +163,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'All fields',
     deadline: 'Varies by country — check with your local Japanese Embassy',
-    status: 'active',
     description:
       "Japan's government scholarship covering tuition, a monthly stipend, and airfare for international students. Applications are submitted through the Japanese Embassy or Consulate in the applicant's home country, and deadlines differ by country (commonly between December and June).",
     eligibility: [
@@ -189,7 +177,6 @@ export const scholarships = [
     benefits: ['Tuition fees waived', 'Monthly stipend', 'Round-trip airfare'],
     applicationUrl: 'https://www.studyinjapan.go.jp/en/smap-stopj-applications-japanese.html',
     isSample: false,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'Gates Cambridge Scholarship',
@@ -199,7 +186,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'All fields',
     deadline: '2027-01-06',
-    status: 'active',
     description:
       'A highly competitive scholarship for outstanding postgraduate applicants from outside the UK to study any full-time postgraduate course at the University of Cambridge. Most non-US applicants fall under the January round; some courses use an earlier December round, and US citizens resident in the US apply in October.',
     eligibility: [
@@ -220,7 +206,6 @@ export const scholarships = [
     ],
     applicationUrl: 'https://www.gatescambridge.org/apply/timeline/',
     isSample: false,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'Chinese Government Scholarship (CSC)',
@@ -230,7 +215,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'All fields',
     deadline: 'Varies by country — typically January to April, via your local Chinese Embassy',
-    status: 'active',
     description:
       "One of the world's largest government scholarship programs, funding study at Chinese universities. Deadlines are set by each country's Chinese Embassy (Type A) or directly by participating universities (Type B), and differ by country and route.",
     eligibility: [
@@ -246,7 +230,6 @@ export const scholarships = [
     benefits: ['Tuition fees', 'Accommodation or housing allowance', 'Monthly stipend', 'Comprehensive medical insurance'],
     applicationUrl: 'https://www.campuschina.org/',
     isSample: false,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'Schwarzman Scholars',
@@ -256,7 +239,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'Global Affairs',
     deadline: 'Applications for the next cohort open April 2027 (2027-28 cycle closed September 2026)',
-    status: 'active',
     description:
       "A one-year Master's in Global Affairs at Schwarzman College, Tsinghua University in Beijing, for a global cohort of up to 200 scholars focused on leadership and understanding China's role in the world.",
     eligibility: [
@@ -268,7 +250,6 @@ export const scholarships = [
     benefits: ['Full tuition', 'Room and board', 'Travel costs', 'In-country study trips'],
     applicationUrl: 'https://www.schwarzmanscholars.org/admissions/',
     isSample: false,
-    sourceCheckedAt: '2026-09-17',
   },
   {
     title: 'Swiss Government Excellence Scholarships',
@@ -278,7 +259,6 @@ export const scholarships = [
     funding: 'Fully Funded',
     field: 'All fields',
     deadline: 'Varies by country — check your local Swiss Embassy (commonly Aug–Dec)',
-    status: 'active',
     description:
       'Awarded by the Swiss Confederation to support postgraduate researchers and postdoctoral scholars from partner countries to conduct research at a Swiss university.',
     eligibility: ["Hold a master's degree (for PhD track) or doctorate (for postdoc track)", 'Citizen of an eligible partner country'],
@@ -286,7 +266,6 @@ export const scholarships = [
     benefits: ['Monthly stipend', 'Tuition fee waiver at the host institution', 'Health insurance contribution'],
     applicationUrl: 'https://www.sbfi.admin.ch/sbfi/en/home/education/scholarships-and-grants/swiss-government-excellence-scholarships.html',
     isSample: false,
-    sourceCheckedAt: '2026-09-17',
   },
 ];
 

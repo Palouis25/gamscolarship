@@ -25,7 +25,7 @@ function normalizeUrl(url?: string): string | null {
   if (!url) return null;
   try {
     const parsed = new URL(url);
-    return (parsed.hostname + parsed.pathname).replace(/\/$/, '').toLowerCase();
+    return (parsed.hostname.replace(/^www\./, '') + parsed.pathname).replace(/\/$/, '').toLowerCase();
   } catch {
     return null;
   }
@@ -74,7 +74,7 @@ export function duplicateScore(a: DuplicateCandidateFields, b: DuplicateCandidat
 
 /**
  * Threshold above which two listings are flagged as possible duplicates
- * (verificationStatus -> rejected, possibleDuplicateOf set) rather than
+ * (stored once as rejected with possibleDuplicateOf set) rather than
  * treated as unrelated. Deliberately conservative — false negatives (an
  * undetected duplicate slipping through as two listings) are a much smaller
  * problem than false positives (a real, distinct listing getting stuck in

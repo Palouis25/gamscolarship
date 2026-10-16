@@ -69,3 +69,6 @@
     position: static;
   }
 }
+
+.details-note { margin: 14px 0 0; font-size: 0.8rem; color: var(--color-text-muted); }
+.details-facts .deadline-chip { margin-left: 0; margin-top: 4px; display: table; }

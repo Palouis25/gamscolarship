@@ -3,6 +3,8 @@ import { useQuery } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import Seo from '../components/Seo.jsx';
 import ScholarshipCard from '../components/ScholarshipCard.jsx';
+import { LoadingGrid, StatusBox } from '../components/StatusMessage.jsx';
+import { byDeadline } from '../lib/format.js';
 import './Home.css';
 
 const categories = [
@@ -16,20 +18,20 @@ const categories = [
 export default function Home() {
   const scholarshipsData = useQuery(api.scholarships.list);
   const scholarships = scholarshipsData ?? [];
-  const featured = scholarships.slice(0, 3);
+  const featured = [...scholarships].sort(byDeadline).slice(0, 3);
   const loading = scholarshipsData === undefined;
 
   return (
     <>
       <Seo
         title="GamScholarship | Find Scholarships"
-        description="Discover verified scholarship opportunities from around the world."
+        description="Discover scholarships from around the world, with links to the official application pages."
       />
 
       <section className="hero">
         <div className="container hero-inner">
           <div className="hero-copy">
-            <h1>Find Your Next Opportunity</h1>
+            <h1>Find Your Next Scholarship</h1>
             <p>
               Discover scholarship opportunities from around the world and
               find programs that match your goals.
@@ -59,10 +61,14 @@ export default function Home() {
         <div className="container">
           <div className="section-heading">
             <h2>Featured Scholarships</h2>
-            <p>A snapshot of verified scholarship opportunities currently open for applications.</p>
+            <p>Scholarships closing soonest. Check each official page for full details.</p>
           </div>
           {loading ? (
-            <p className="results-count">Loading scholarships...</p>
+            <LoadingGrid count={3} />
+          ) : featured.length === 0 ? (
+            <StatusBox title="No scholarships are published yet">
+              Listings appear here once they have been collected and their official links verified.
+            </StatusBox>
           ) : (
             <div className="grid grid-3">
               {featured.map((s) => (
@@ -82,16 +88,13 @@ export default function Home() {
         <div className="container">
           <div className="section-heading">
             <h2>Browse by Category</h2>
-            <p>Jump straight to the type of opportunity you're looking for.</p>
+            <p>Jump straight to the scholarships that fit your level and funding needs.</p>
           </div>
           <div className="category-grid">
             {categories.map((cat) => (
               <Link
                 key={cat.label}
-                to={
-                  cat.to ||
-                  `/scholarships?${cat.filterKey}=${encodeURIComponent(cat.filterValue)}`
-                }
+                to={`/scholarships?${cat.filterKey}=${encodeURIComponent(cat.filterValue)}`}
                 className="category-pill"
               >
                 {cat.label}
@@ -112,7 +115,7 @@ export default function Home() {
               <li>Understand eligibility requirements before you apply</li>
               <li>Track application deadlines so you never miss one</li>
               <li>Open the official application page directly</li>
-              <li>Browse verified listings only</li>
+              <li>Every listing links to an official page whose link we check automatically</li>
             </ul>
           </div>
           <div className="why-art" aria-hidden="true">
@@ -135,8 +138,8 @@ export default function Home() {
         <div className="container cta-band-inner">
           <h2>Never Miss a Deadline</h2>
           <p>
-            New scholarships are added regularly &mdash;
-            check back often, or start exploring now.
+            Listings are collected and re-checked automatically, and expired
+            scholarships are hidden. Start exploring now.
           </p>
           <Link to="/scholarships" className="btn btn-accent">
             Browse Scholarships

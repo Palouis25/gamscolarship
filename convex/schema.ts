@@ -24,7 +24,7 @@ const verificationStatus = v.union(
   v.literal('pending'), // newly ingested or waiting for an automated retry — never public
   v.literal('verified'), // passed automated checks — eligible for public display
   v.literal('rejected'), // failed automated checks — never public
-  v.literal('needs_review') // legacy value kept for old records; never created by the new pipeline
+  v.literal('needs_review') // legacy value for old records only; never created, never public
 );
 
 const lifecycleStatus = v.union(v.literal('active'), v.literal('expired'));
@@ -51,6 +51,7 @@ const listingSharedFields = {
   isSample: v.boolean(), // illustrative/demo entry vs a freshly-verified real one
   lastCheckedAt: v.optional(v.string()), // ISO datetime — last time the pipeline touched this record
   lastVerifiedAt: v.optional(v.string()), // ISO datetime — last time it passed verification
+  linkFailureCount: v.optional(v.number()), // consecutive failed link checks (dead=2, transient=1); demotes at >=3
   createdAt: v.string(),
   updatedAt: v.string(),
 };
@@ -70,6 +71,11 @@ export default defineSchema({
     .index('by_verification', ['verificationStatus'])
     .index('by_source', ['sourceName', 'sourceId']),
 
+  // LEGACY — GamScholarship lists scholarships only. This table is kept ONLY so
+  // that deploying this schema cannot fail on documents that already exist.
+  // Nothing reads or writes it. To retire it: run
+  //   npx convex run maintenance:purgeLegacyOpportunities
+  // until it reports 0 remaining, then delete this table definition.
   opportunities: defineTable({
     ...listingSharedFields,
     category: v.string(),

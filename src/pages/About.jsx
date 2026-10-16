@@ -28,13 +28,13 @@ export default function About() {
           <ul>
             <li>Helping students discover scholarship opportunities</li>
             <li>Making eligibility and requirements easier to understand</li>
-            <li>Keeping scholarship listings current</li>
+            <li>Hiding expired scholarships automatically</li>
             <li>Linking applicants to official application pages</li>
           </ul>
 
           <h2>A Growing Platform</h2>
           <p>
-            GamScholarship is under active development. Scholarship listings are added and updated automatically as the platform grows.
+            GamScholarship collects scholarships from official sources and checks that each application link is live and points to a recognised official site before a listing is shown. These checks confirm the link, not every detail: always confirm the deadline and eligibility on the official page before you apply.
           </p>
         </div>
       </section>

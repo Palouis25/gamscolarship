@@ -1,100 +1,71 @@
-// Automated validation checks run against a listing before it can move to
-// verificationStatus="verified". These are the checks from the project
-// spec's Step 4. Pure structural/content checks live here as a plain
-// function (callable from a mutation); the URL-reachability check needs
-// `fetch`, so it's a Convex action (see checkUrlReachable below and its
-// use in convex/ingestion.ts).
+// Automated, network-free validation run before a listing can be verified.
+// (Link reachability is checked separately: see lib/linkCheck.ts.)
 
-export type ValidationIssue = {
-  field: string;
-  problem: string;
-};
+import { parseDeadline } from './lib/deadline';
+import { assessUrl, hostOf, isOfficialHost } from './lib/urlSafety';
+import type { NormalizedListing } from './sources/types';
 
-export type NormalizedListingInput = {
-  title: string;
-  organization: string;
-  country: string;
-  deadline: string;
-  description: string;
-  applicationUrl: string;
-  officialSourceUrl?: string;
-};
+export type ValidationIssue = { field: string; problem: string };
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const JOB_WORDS = /\b(internships?|jobs?|vacanc(?:y|ies)|recruitment|hiring|careers?|competitions?|contests?|conferences?|workshops?|webinars?|exchange programmes?)\b/i;
+const SCHOLARSHIP_WORDS = /\b(scholarships?|bursar(?:y|ies)|studentships?|scholars)\b/i;
+const FUNDING_WORDS = /\b(scholarships?|bursar(?:y|ies)|studentships?|tuition|stipend|funded|funding|grants?|burslari)\b/i;
 
-/**
- * Structural/content checks that don't require any network access:
- * required fields present, URL looks like a URL, deadline is either a
- * valid ISO date or a non-empty descriptive string, deadline (if a date)
- * hasn't already passed, description isn't suspiciously short/templated.
- *
- * Returns an empty array when everything looks fine.
- */
-export function runStaticChecks(input: NormalizedListingInput): ValidationIssue[] {
+/** Scholarships only: rejects jobs, internships, competitions, bare fellowships. */
+export function isScholarshipContent(input: Pick<NormalizedListing, 'title' | 'description'>): string | null {
+  if (JOB_WORDS.test(input.title) && !SCHOLARSHIP_WORDS.test(input.title)) {
+    return 'Title looks like a job, internship, competition or event, not a scholarship.';
+  }
+  if (/\bfellowships?\b/i.test(input.title) && !SCHOLARSHIP_WORDS.test(input.title)) {
+    return 'Fellowships are out of scope; only scholarships are listed.';
+  }
+  if (!FUNDING_WORDS.test(`${input.title} ${input.description}`)) {
+    return 'Nothing in the title or description indicates scholarship funding.';
+  }
+  return null;
+}
+
+export function runStaticChecks(input: NormalizedListing, today: string = new Date().toISOString().slice(0, 10)): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-
-  const requiredText: Array<keyof NormalizedListingInput> = [
-    'title',
-    'organization',
-    'country',
-    'description',
-    'applicationUrl',
-  ];
-  for (const field of requiredText) {
-    if (!input[field] || !String(input[field]).trim()) {
-      issues.push({ field, problem: 'Required field is missing or empty.' });
-    }
+  const req = ['title', 'organization', 'country', 'description', 'applicationUrl', 'level', 'funding', 'field'] as const;
+  for (const f of req) {
+    if (typeof input[f] !== 'string' || !input[f].trim()) issues.push({ field: f, problem: 'Required field is missing or empty.' });
   }
 
   if (input.applicationUrl) {
-    try {
-      const parsed = new URL(input.applicationUrl);
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        issues.push({ field: 'applicationUrl', problem: 'URL must be http(s).' });
-      }
-    } catch {
-      issues.push({ field: 'applicationUrl', problem: 'Not a valid URL.' });
+    for (const i of assessUrl(input.applicationUrl)) issues.push({ field: 'applicationUrl', problem: i.problem });
+    const host = hostOf(input.applicationUrl);
+    if (host && !isOfficialHost(host) && input.urlTrust !== 'official_feed') {
+      issues.push({
+        field: 'applicationUrl',
+        problem: `Host "${host}" is not a recognised official source (add its domain to OFFICIAL_DOMAINS in convex/lib/urlSafety.ts if it is genuine).`,
+      });
     }
   }
-
   if (input.officialSourceUrl) {
-    try {
-      new URL(input.officialSourceUrl);
-    } catch {
-      issues.push({ field: 'officialSourceUrl', problem: 'Not a valid URL.' });
-    }
+    for (const i of assessUrl(input.officialSourceUrl)) issues.push({ field: 'officialSourceUrl', problem: i.problem });
   }
 
-  if (!input.deadline || !input.deadline.trim()) {
-    issues.push({ field: 'deadline', problem: 'Deadline is missing.' });
-  } else if (ISO_DATE.test(input.deadline)) {
-    const today = new Date().toISOString().slice(0, 10);
-    if (input.deadline < today) {
-      issues.push({ field: 'deadline', problem: 'Deadline is already in the past.' });
-    }
+  const dl = typeof input.deadline === 'string' ? input.deadline.trim() : '';
+  if (!dl) issues.push({ field: 'deadline', problem: 'Deadline is missing.' });
+  else {
+    const info = parseDeadline(dl);
+    if (info.kind === 'date' && info.iso < today) issues.push({ field: 'deadline', problem: 'Deadline is already in the past.' });
   }
-  // Non-ISO deadline strings (e.g. "Varies by country") are accepted as-is —
-  // there's no single date to sanity-check, so this isn't flagged here.
 
   if (input.description && input.description.trim().length < 40) {
-    issues.push({
-      field: 'description',
-      problem: 'Description looks too short to be a real, useful listing.',
-    });
+    issues.push({ field: 'description', problem: 'Description looks too short to be a real, useful listing.' });
   }
-
+  if (input.title && input.description) {
+    const scope = isScholarshipContent(input);
+    if (scope) issues.push({ field: 'title', problem: scope });
+  }
   return issues;
 }
 
-/**
- * Very rough template-farm detector: catches the exact pattern found in
- * the legacy PHP cache (see project notes) — a generic organization name
- * paired with a numbered, formulaic title like "... Program 133".
- * This is a heuristic, not a guarantee — genuine numbered cohorts/rounds
- * exist too, so this automatically rejects suspicious formulaic listings.
- */
-export function looksTemplated(input: NormalizedListingInput): boolean {
+/** Heuristic for formulaic template-farm listings ("... Program 133" by a generic "Foundation"). */
+export function looksTemplated(input: Pick<NormalizedListing, 'title' | 'organization'>): boolean {
   const numberedTitle = /\b(program|programme|scholarship)\s*#?\d{2,4}\b/i.test(input.title);
-  const genericOrgWords = /\b(foundation|network|initiative)\b/i.test(input.organization);
-  return numberedTitle && genericOrgWords;
+  const genericOrg = /\b(foundation|network|initiative)\b/i.test(input.organization);
+  return numberedTitle && genericOrg;
 }
